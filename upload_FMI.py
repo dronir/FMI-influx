@@ -17,7 +17,7 @@ Debug_levels = {
     "error" : logging.ERROR
 }
 
-QueryURLTemplate = "https://opendata.fmi.fi/wfs?{PARAMS}"
+QueryURL = "https://opendata.fmi.fi/wfs"
 
 QueryParams = {
     "service" : "WFS",
@@ -37,18 +37,12 @@ def get_timestring(T):
     return T.isoformat().split(".")[0] + "Z"
 
 
-def get_paramstring(params):
-    """Generate a query parameter string from dictionary."""
-    return "&".join([f"{key}={value}" for key, value in params.items()])
-
-
 async def rawdata_from_query(session, QueryParams):
     """Make HTTP request, process result into data dictionary."""
-    parStr = get_paramstring(QueryParams)
-    QueryURL = QueryURLTemplate.format(PARAMS=parStr)
-    logging.debug(QueryURL)
+    logging.debug(f"FMI query url: {QueryURL}")
+    logging.debug(f"Query parameters: {QueryParams}")
     try:
-        async with session.get(QueryURL) as response:
+        async with session.get(QueryURL, params=QueryParams) as response:
             logging.debug(response)
             if response.status == 200:
                 return await response.text()
@@ -71,13 +65,8 @@ def values_from_XML(XMLTree):
     # Handle namespaces properly because why not (could just wildcard them to be honest)
     ns_wfs = XMLTree.nsmap["wfs"]
     ns_bswfs = XMLTree.nsmap["BsWfs"]
-    members = members_from_XML(XMLTree, ns_wfs)
+    members = XMLTree.findall(f".//{{{ns_wfs}}}member")
     return [value_from_element(m, ns_bswfs) for m in members]
-
-
-def members_from_XML(XMLTree, ns="*"):
-    """Get individual data elements from XML tree."""
-    return XMLTree.findall(f".//{{{ns}}}member")
 
 
 def value_from_element(member, ns="*"):
@@ -170,5 +159,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=Debug_levels[debug])
     logging.info(f"Debug level is '{debug}'.")
 
+    # There's actually no need to do anything with asyncio, since
+    # everything happens serially right now, but possibly features
+    # will be added that require concurrency...
     loop = asyncio.get_event_loop()
     loop.run_until_complete(mainloop(config))
