@@ -10,7 +10,12 @@ from math import isnan
 from sys import argv
 from lxml import etree
 
-logging.basicConfig(level=logging.WARNING)
+Debug_levels = {
+    "debug" : logging.DEBUG,
+    "warning" : logging.WARNING,
+    "info" : logging.INFO,
+    "error" : logging.ERROR
+}
 
 QueryURLTemplate = "https://opendata.fmi.fi/wfs?{PARAMS}"
 
@@ -62,14 +67,14 @@ def XML_from_raw(raw_result):
     return etree.fromstring(XMLdata) 
 
 
-def data_from_XML(XMLTree):
-    """Return data dictionary given XML tree."""
+def values_from_XML(XMLTree):
+    """Return data points for AIOInflux, given XML tree."""
     # Handle namespaces properly because why not (could just wildcard them to be honest)
     ns_wfs = XMLTree.nsmap["wfs"]
     ns_bswfs = XMLTree.nsmap["BsWfs"]
     members = members_from_XML(XMLTree, ns_wfs)
-    values = [value_from_element(m, ns_bswfs) for m in members]
-    return to_dict(values)
+    return [value_from_element(m, ns_bswfs) for m in members]
+
 
 def members_from_XML(XMLTree, ns="*"):
     """Get individual data elements from XML tree."""
@@ -86,49 +91,57 @@ def value_from_element(member, ns="*"):
     return (t, var, float(value))
 
 
-def to_dict(values):
+def points_from_values(influx_config, values):
     """Make a JSON-like dict structure from (time, variable name, value) pairs,
     indexed by first time stamp, then variable name.
     """
-    out = defaultdict(lambda: defaultdict(dict))
+    # Group the data by timestamp by putting it all in a dict.
+    temp = defaultdict(lambda: defaultdict(dict))
     for t, var, value in values:
         if isnan(value):
             continue
-        out[t][var] = value
-    # Turn the double-defaultdict into regular dicts, though probably unnecessary
-    for t in out.keys():
-        out[t] = dict(out[t])
-    return dict(out)
+        temp[t][var] = value
 
-
-def format_influx(config, data):
     points = []
-    for timestamp, fields in data.items():
-        point = {
-            "measurement" : config["influxdb"]["measurement"],
-            "time" : timestamp,
+    for t, fields in temp.items():
+        points.append({
+            "measurement" : influx_config["measurement"],
+            "time" : t,
             "fields" : fields,
             "tags" : {}
-        }
-        points.append(point)
+        })
     return points
 
 
 
+async def upload_influx(influx_config, points):
+    async with aioinflux.InfluxDBClient(
+                        host=influx_config["host"],
+                        port=influx_config["port"],
+                        db=influx_config["database"],
+                        username=influx_config["user"],
+                        password=influx_config["password"],
+                        ssl=True
+                    ) as client:
+        for point in points:
+            try:
+                await client.write(point)
+            except ValueError as E:
+                logging.error(f"Failed to write to InfluxDB: {E}")
+    return True
+
 
 async def mainloop(config):
-    dt = 1
-    # TODO: parse config
-
     influx_config = config["influxdb"]
+    FMI_config = config["FMI"]
 
-    QueryParams["place"] = config["FMI"]["location"]
-    QueryParams["parameters"] = ",".join(config["FMI"]["variables"])
+    delay = FMI_config.get("delay", 60)
+    QueryParams["place"] = FMI_config.get("location", "Kumpula")
+    QueryParams["parameters"] = ",".join(FMI_config.get("variables", []))
 
     while True:
-        await asyncio.sleep(dt)
-        
         now = datetime.utcnow()
+        logging.info("Start working...")
         start = now - timedelta(minutes=10)
         QueryParams["starttime"] = get_timestring(start)
         QueryParams["endtime"] = get_timestring(now)
@@ -137,27 +150,26 @@ async def mainloop(config):
         async with aiohttp.ClientSession() as session:
             raw_data = await rawdata_from_query(session, QueryParams)
         logging.debug(raw_data)
+
+        # 2. Parse XML and convert to data points for AIOInflux
         XML = XML_from_raw(raw_data)
-        data = data_from_XML(XML)
+        values = values_from_XML(XML)
+        points = points_from_values(influx_config, values)
+        ts = [point["time"].isoformat() for point in points]
+        logging.info(f"Data for times {ts} received from FMI.")
 
-        # 2. Parse XML into something we can upload
-        point = format_influx(config, data)
+        await upload_influx(influx_config, points)
         
-        # 3. Upload into InfluxDB  
-        async with aioinflux.InfluxDBClient(
-                        host=influx_config["host"],
-                        port=influx_config["port"],
-                        db=influx_config["database"],
-                        username=influx_config["user"],
-                        password=influx_config["password"],
-                        ssl=True
-                    ) as client:
-            await client.write(point)
-        logging.info("Data sent.")
-
+        logging.info(f"Data sent to Influx. Waiting for {delay} seconds...")
+        await asyncio.sleep(delay)
         
 
 if __name__ == "__main__":
     config = read_config(argv[1])
+
+    debug = config.get("debug_level", "warning")
+    logging.basicConfig(level=Debug_levels[debug])
+    logging.info(f"Debug level is '{debug}'.")
+
     loop = asyncio.get_event_loop()
     loop.run_until_complete(mainloop(config))
