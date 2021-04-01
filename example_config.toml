@@ -5,6 +5,8 @@ host = "influxdb.mydomain.com"
 port = 8086
 user = ""
 password = ""
+database = "testing"
+measurement = "weather"
 
 [FMI]
 
