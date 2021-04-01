@@ -39,8 +39,7 @@ def get_timestring(T):
 
 def get_paramstring(params):
     """Generate a query parameter string from dictionary."""
-    kvpairs = ["{}={}".format(*item) for item in params.items()]
-    return "&".join(kvpairs)
+    return "&".join([f"{key}={value}" for key, value in params.items()])
 
 
 async def rawdata_from_query(session, QueryParams):
