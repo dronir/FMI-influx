@@ -38,7 +38,7 @@ def get_timestring(T):
 
 
 async def rawdata_from_query(session, QueryParams):
-    """Make HTTP request, process result into data dictionary."""
+    """Make HTTP request, return text contents."""
     logging.debug(f"FMI query url: {QueryURL}")
     logging.debug(f"Query parameters: {QueryParams}")
     try:
@@ -61,7 +61,7 @@ def XML_from_raw(raw_result):
 
 
 def values_from_XML(XMLTree):
-    """Return data points for AIOInflux, given XML tree."""
+    """Return all (time, variable, value) triplets, given XML tree."""
     # Handle namespaces properly because why not (could just wildcard them to be honest)
     ns_wfs = XMLTree.nsmap["wfs"]
     ns_bswfs = XMLTree.nsmap["BsWfs"]
@@ -70,26 +70,27 @@ def values_from_XML(XMLTree):
 
 
 def value_from_element(member, ns="*"):
-    """Get timestamp, variable name and value from XML element."""
+    """Get one (time, variable, value) triplet from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
     value = member.find(f".//{{{ns}}}ParameterValue").text
-    # Remove the 'Z' at the end of timestamp crudely:
+    # Remove the 'Z' at the end of timestamp crudely.
+    # Convert timestamp to datetime and value to float.
     t = datetime.fromisoformat(time[:-1])
     return (t, var, float(value))
 
 
 def points_from_values(influx_config, values):
-    """Make a JSON-like dict structure from (time, variable name, value) pairs,
-    indexed by first time stamp, then variable name.
-    """
-    # Group the data by timestamp by putting it all in a dict.
+    """Make list of data points for AIOInflux from a list of (time, variable, value) triplets."""
+
+    # Group the data by timestamp by putting it all in a dict. Skip missing (NaN) values.
     temp = defaultdict(lambda: defaultdict(dict))
     for t, var, value in values:
         if isnan(value):
             continue
         temp[t][var] = value
 
+    # Make list of data points in the format expected by AIOInflux.
     points = []
     for t, fields in temp.items():
         points.append({
@@ -103,6 +104,7 @@ def points_from_values(influx_config, values):
 
 
 async def upload_influx(influx_config, points):
+    """Upload a list of data points to InfluxDB."""
     async with aioinflux.InfluxDBClient(
                         host=influx_config["host"],
                         port=influx_config["port"],
@@ -155,12 +157,15 @@ async def mainloop(config):
 if __name__ == "__main__":
     config = read_config(argv[1])
 
+    # Set logging levels.
     debug = config.get("debug_level", "warning")
     logging.basicConfig(level=Debug_levels[debug])
     logging.info(f"Debug level is '{debug}'.")
 
+    # Run main task asynchronously.
     # There's actually no need to do anything with asyncio, since
     # everything happens serially right now, but possibly features
     # will be added that require concurrency...
+    # I mostly wanted to check out AIOInflux.
     loop = asyncio.get_event_loop()
     loop.run_until_complete(mainloop(config))
