@@ -1,0 +1,13 @@
+
+[influxdb]
+
+host = "influxdb.mydomain.com"
+port = 8086
+user = ""
+password = ""
+
+[FMI]
+
+variables = ["temperature", "pressure", "humidity"]
+location = "Kumpula"
+
