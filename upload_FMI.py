@@ -132,7 +132,8 @@ async def mainloop(config):
     while True:
         now = datetime.utcnow()
         logging.info("Start working...")
-        start = now - timedelta(minutes=10)
+        history = FMI_config.get("history", 10)
+        start = now - timedelta(minutes=history)
         QueryParams["starttime"] = get_timestring(start)
         QueryParams["endtime"] = get_timestring(now)
 

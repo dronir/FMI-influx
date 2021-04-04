@@ -8,8 +8,14 @@ password = ""
 database = "testing"
 measurement = "weather"
 
+[influxdb.tags]
+
+source = "FMI uploader"
+
 [FMI]
 
+delay = 30
+history = 20
 variables = ["temperature", "pressure", "humidity"]
 location = "Kumpula"
 
