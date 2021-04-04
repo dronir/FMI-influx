@@ -97,10 +97,7 @@ def points_from_values(influx_config, values):
             "measurement" : influx_config["measurement"],
             "time" : t,
             "fields" : fields,
-            "tags" : {
-                "version" : 1,
-                "source" : "FMI"
-            }
+            "tags" : influx_config.get("tags", {})
         })
     return points
 
