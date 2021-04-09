@@ -7,7 +7,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import isnan
-from sys import argv
+from sys import argv, exit
 from lxml import etree
 
 Debug_levels = {
@@ -47,9 +47,10 @@ async def rawdata_from_query(session, QueryParams):
             if response.status == 200:
                 return await response.text()
             else:
+                logging.error(f"HTTP error {response.status} when fetching data.")
                 return None
-    except aiohttp.client_exceptions.ClientConnectorError:
-        logging.error("Could not retrieve data.")
+    except aiohttp.client_exceptions.ClientConnectorError as E:
+        logging.error(f"Error while retrieving data: {E}")
         return None
 
 
@@ -57,7 +58,11 @@ async def rawdata_from_query(session, QueryParams):
 def XML_from_raw(raw_result):
     """Turn text content from HTTP request into XML tree."""
     XMLdata = bytes(raw_result, "utf-8")
-    return etree.fromstring(XMLdata) 
+    try:
+        return etree.fromstring(XMLdata) 
+    except Exception as E:
+        logging.error(f"Exception while parsing XML data:\n {E}")
+        return etree.Element("root") # Return an empty XML tree.
 
 
 def values_from_XML(XMLTree):
@@ -74,10 +79,17 @@ def value_from_element(member, ns="*"):
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
     value = member.find(f".//{{{ns}}}ParameterValue").text
-    # Remove the 'Z' at the end of timestamp crudely.
     # Convert timestamp to datetime and value to float.
-    t = datetime.fromisoformat(time[:-1])
-    return (t, var, float(value))
+    # If there's an error, return a NaN value that will get ignored later.
+    try:
+        # Remove the 'Z' at the end of timestamp crudely.
+        t = datetime.fromisoformat(time[:-1])
+        val = float(value)
+    except Exception as E:
+        logging.error(f"Failed to convert timestamp of value from XML: {E}")
+        return (datetime.utcnow(), var, float("NaN"))
+    else:
+        return (t, var, val)
 
 
 def points_from_values(influx_config, values):
@@ -121,6 +133,20 @@ async def upload_influx(influx_config, points):
     return True
 
 
+def check_config(config):
+    return "influxdb" in config and check_config_influx(config["influxdb"])
+
+
+def check_config_influx(config):
+    return ("host" in config
+        and "port" in config
+        and "user" in config
+        and "password" in config
+        and "database" in config
+        and "measurement" in config)
+
+     
+
 async def mainloop(config):
     influx_config = config["influxdb"]
     FMI_config = config["FMI"]
@@ -140,23 +166,34 @@ async def mainloop(config):
         # 1. Get data from FMI
         async with aiohttp.ClientSession() as session:
             raw_data = await rawdata_from_query(session, QueryParams)
+        if raw_data == None:
+            logging.error(f"No data received. Waiting {delay} seconds to retry.")
+            await asyncio.sleep(delay)
+            continue
+        
         logging.debug(raw_data)
 
         # 2. Parse XML and convert to data points for AIOInflux
         XML = XML_from_raw(raw_data)
         values = values_from_XML(XML)
         points = points_from_values(influx_config, values)
-        ts = [point["time"].isoformat() for point in points]
-        logging.info(f"Data for times {ts} received from FMI.")
 
-        await upload_influx(influx_config, points)
+        if len(points) > 0:
+            ts = [point["time"].isoformat() for point in points]
+            logging.info(f"Data for times {ts} received from FMI.")
+            await upload_influx(influx_config, points)
+        else:
+            logging.warning(f"No data points found in XML.")
         
-        logging.info(f"Data sent to Influx. Waiting for {delay} seconds...")
+        logging.info(f"Waiting for {delay} seconds...")
         await asyncio.sleep(delay)
         
 
 if __name__ == "__main__":
     config = read_config(argv[1])
+    if not check_config(config):
+        logging.error("Config file is not ok.")
+        exit()
 
     # Set logging levels.
     debug = config.get("debug_level", "warning")
