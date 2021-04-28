@@ -200,5 +200,4 @@ if __name__ == "__main__":
     # everything happens serially right now, but maybe features
     # will be added that require concurrency...
     # I mostly wanted to check out AIOInflux.
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(mainloop(config))
+    asyncio.run(mainloop(config))
