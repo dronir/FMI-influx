@@ -116,14 +116,7 @@ def points_from_values(influx_config, values):
 
 async def upload_influx(influx_config, points):
     """Upload a list of data points to InfluxDB."""
-    async with aioinflux.InfluxDBClient(
-                        host=influx_config["host"],
-                        port=influx_config["port"],
-                        db=influx_config["database"],
-                        username=influx_config["user"],
-                        password=influx_config["password"],
-                        ssl=True
-                    ) as client:
+    async with aioinflux.InfluxDBClient(**influx_config["connection"], ssl=True) as client:
         for point in points:
             try:
                 await client.write(point)
@@ -137,12 +130,13 @@ def check_config(config):
 
 
 def check_config_influx(config):
-    return ("host" in config
-        and "port" in config
-        and "user" in config
-        and "password" in config
-        and "database" in config
-        and "measurement" in config)
+    return ("connection" in config
+        and "host" in config["connection"]
+        and "port" in config["connection"]
+        and "username" in config["connection"]
+        and "password" in config["connection"]
+        and "db" in config["connection"]
+        )
 
      
 

@@ -1,21 +1,31 @@
+# Example config file for upload_FMI.py
+
+debug_level = "info"
+
 
 [influxdb]
 
-host = "influxdb.mydomain.com"
-port = 8086
-user = ""
-password = ""
-database = "testing"
-measurement = "weather"
+    measurement = "weather"
+
+
+[influxdb.connection]
+
+    host = "influxdb.mydomain.com"
+    port = 8086
+    username = ""
+    password = ""
+    db = "testing"
+
 
 [influxdb.tags]
 
-source = "FMI uploader"
+    source = "FMI uploader"
+
 
 [FMI]
 
-delay = 30
-history = 20
-variables = ["temperature", "pressure", "humidity"]
-location = "Kumpula"
+    delay = 30
+    history = 20
+    variables = ["temperature", "pressure", "humidity"]
+    location = "Kumpula"
 
