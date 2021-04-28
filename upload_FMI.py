@@ -10,16 +10,16 @@ from math import isnan
 from sys import argv, exit
 from lxml import etree
 
-Debug_levels = {
+DEBUG_LEVELS = {
     "debug" : logging.DEBUG,
     "warning" : logging.WARNING,
     "info" : logging.INFO,
     "error" : logging.ERROR
 }
 
-QueryURL = "https://opendata.fmi.fi/wfs"
+QUERY_URL = "https://opendata.fmi.fi/wfs"
 
-QueryParams = {
+DEFAULT_QUERY_PARAMS = {
     "service" : "WFS",
     "storedquery_id" : "fmi::observations::weather::simple",
     "request" : "getFeature",
@@ -37,12 +37,12 @@ def get_timestring(T):
     return T.isoformat().split(".")[0] + "Z"
 
 
-async def rawdata_from_query(session, QueryParams):
+async def rawdata_from_query(session, query_params):
     """Make HTTP request, return text contents."""
-    logging.debug(f"FMI query url: {QueryURL}")
-    logging.debug(f"Query parameters: {QueryParams}")
+    logging.debug(f"FMI query url: {QUERY_URL}")
+    logging.debug(f"Query parameters: {query_params}")
     try:
-        async with session.get(QueryURL, params=QueryParams) as response:
+        async with session.get(QUERY_URL, params=query_params) as response:
             logging.debug(response)
             if response.status == 200:
                 return await response.text()
@@ -54,23 +54,22 @@ async def rawdata_from_query(session, QueryParams):
         return None
 
 
-
-def XML_from_raw(raw_result):
+def xml_from_raw(raw_result):
     """Turn text content from HTTP request into XML tree."""
-    XMLdata = bytes(raw_result, "utf-8")
+    xml_data = bytes(raw_result, "utf-8")
     try:
-        return etree.fromstring(XMLdata) 
+        return etree.fromstring(xml_data) 
     except Exception as E:
         logging.error(f"Exception while parsing XML data:\n {E}")
         return etree.Element("root") # Return an empty XML tree.
 
 
-def values_from_XML(XMLTree):
+def values_from_xml(xml_tree):
     """Return all (time, variable, value) triplets, given XML tree."""
     # Handle namespaces properly because why not (could just wildcard them to be honest)
-    ns_wfs = XMLTree.nsmap["wfs"]
-    ns_bswfs = XMLTree.nsmap["BsWfs"]
-    members = XMLTree.findall(f".//{{{ns_wfs}}}member")
+    ns_wfs = xml_tree.nsmap["wfs"]
+    ns_bswfs = xml_tree.nsmap["BsWfs"]
+    members = xml_tree.findall(f".//{{{ns_wfs}}}member")
     return [value_from_element(m, ns_bswfs) for m in members]
 
 
@@ -149,23 +148,25 @@ def check_config_influx(config):
 
 async def mainloop(config):
     influx_config = config["influxdb"]
-    FMI_config = config["FMI"]
+    fmi_config = config["FMI"]
 
-    delay = FMI_config.get("delay", 60)
-    QueryParams["place"] = FMI_config.get("location", "Kumpula")
-    QueryParams["parameters"] = ",".join(FMI_config.get("variables", []))
+    delay = fmi_config.get("delay", 60)
+    history = fmi_config.get("history", 10)
+
+    query_params = DEFAULT_QUERY_PARAMS.copy()
+    query_params["place"] = fmi_config.get("location", "Kumpula")
+    query_params["parameters"] = ",".join(fmi_config.get("variables", []))
 
     while True:
         now = datetime.utcnow()
         logging.info("Start working...")
-        history = FMI_config.get("history", 10)
         start = now - timedelta(minutes=history)
-        QueryParams["starttime"] = get_timestring(start)
-        QueryParams["endtime"] = get_timestring(now)
+        query_params["starttime"] = get_timestring(start)
+        query_params["endtime"] = get_timestring(now)
 
         # 1. Get data from FMI
         async with aiohttp.ClientSession() as session:
-            raw_data = await rawdata_from_query(session, QueryParams)
+            raw_data = await rawdata_from_query(session, query_params)
         if raw_data == None:
             logging.error(f"No data received. Waiting {delay} seconds to retry.")
             await asyncio.sleep(delay)
@@ -174,13 +175,13 @@ async def mainloop(config):
         logging.debug(raw_data)
 
         # 2. Parse XML and convert to data points for AIOInflux
-        XML = XML_from_raw(raw_data)
-        values = values_from_XML(XML)
+        xml_data = xml_from_raw(raw_data)
+        values = values_from_xml(xml_data)
         points = points_from_values(influx_config, values)
 
         if len(points) > 0:
             ts = [point["time"].isoformat() for point in points]
-            logging.info(f"Data for times {ts} received from FMI.")
+            logging.info(f"Data for timestamps {ts} received from FMI.")
             await upload_influx(influx_config, points)
         else:
             logging.warning(f"No data points found in XML.")
@@ -197,12 +198,12 @@ if __name__ == "__main__":
 
     # Set logging levels.
     debug = config.get("debug_level", "warning")
-    logging.basicConfig(level=Debug_levels[debug])
+    logging.basicConfig(level=DEBUG_LEVELS[debug])
     logging.info(f"Debug level is '{debug}'.")
 
     # Run main task asynchronously.
     # There's actually no need to do anything with asyncio, since
-    # everything happens serially right now, but possibly features
+    # everything happens serially right now, but maybe features
     # will be added that require concurrency...
     # I mostly wanted to check out AIOInflux.
     loop = asyncio.get_event_loop()
