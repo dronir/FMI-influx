@@ -1,25 +1,25 @@
 import aiohttp
 import asyncio
 import aioinflux
-import toml
 import logging
-from typing import Dict, Any, Tuple, List
+
+from pydantic import BaseSettings, Field
+from typing import Dict, Any, Tuple, List, Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import isnan
-from sys import exit
 from lxml import etree
 
 DEBUG_LEVELS = {
     "debug": logging.DEBUG,
-    "warning": logging.WARNING,
     "info": logging.INFO,
+    "warning": logging.WARNING,
     "error": logging.ERROR,
 }
 
 QUERY_URL = "https://opendata.fmi.fi/wfs"
 
-DEFAULT_QUERY_PARAMS = {
+BASE_QUERY_PARAMS = {
     "service": "WFS",
     "storedquery_id": "fmi::observations::weather::simple",
     "request": "getFeature",
@@ -27,10 +27,38 @@ DEFAULT_QUERY_PARAMS = {
 }
 
 
-def read_config(filename) -> Dict[str, Any]:
-    """Load config from TOML file."""
-    with open(filename, "r") as f:
-        return toml.loads(f.read())
+class FMIConfig(BaseSettings):
+    history: int = 60
+    delay: int = 10
+    variables: List[str] = ["temperature", "pressure"]
+    location: str
+
+    class Config:
+        env_file = ".env"
+        env_prefix = "UPLOADER_FMI_"
+
+
+class InfluxConfig(BaseSettings):
+    measurement: str
+    host: str
+    port: int = 8086
+    database: str
+    username: str
+    password: str
+    tags: Dict[str, str] = {}
+
+    class Config:
+        env_file = ".env"
+        env_prefix = "UPLOADER_INFLUX_"
+
+
+class Config(BaseSettings):
+    debug_level: str = "info"
+    FMI: FMIConfig = Field(default_factory=FMIConfig)
+    influx: InfluxConfig = Field(default_factory=InfluxConfig)
+
+    class Config:
+        env_prefix = "UPLOADER_"
 
 
 def get_timestring(t: datetime) -> str:
@@ -38,7 +66,9 @@ def get_timestring(t: datetime) -> str:
     return t.isoformat().split(".")[0] + "Z"
 
 
-async def rawdata_from_query(session: aiohttp.ClientSession, query_params: Dict):
+async def rawdata_from_query(
+    session: aiohttp.ClientSession, query_params: Dict
+) -> Optional[str]:
     """Make HTTP request, return text contents."""
     logging.debug(f"FMI query url: {QUERY_URL}")
     logging.debug(f"Query parameters: {query_params}")
@@ -55,7 +85,7 @@ async def rawdata_from_query(session: aiohttp.ClientSession, query_params: Dict)
         return None
 
 
-def xml_from_raw(raw_result: str) -> None:
+def xml_from_raw(raw_result: str) -> etree.Element:
     """Turn text content from HTTP request into XML tree."""
     xml_data = bytes(raw_result, "utf-8")
     try:
@@ -65,7 +95,7 @@ def xml_from_raw(raw_result: str) -> None:
         return etree.Element("root")  # Return an empty XML tree.
 
 
-def values_from_xml(xml_tree) -> List:
+def values_from_xml(xml_tree: etree.Element) -> List[Tuple]:
     """Return all (time, variable, value) triplets, given XML tree."""
     # Handle namespaces properly because why not (could just wildcard them to be honest)
     ns_wfs = xml_tree.nsmap["wfs"]
@@ -92,7 +122,7 @@ def value_from_element(member, ns: str = "*") -> Tuple:
         return t, var, val
 
 
-def points_from_values(influx_config: Dict[str, Any], values: List):
+def points_from_values(config: Config, values: List) -> List[Dict[str, Any]]:
     """Make list of data points for AIOInflux from a list of (time, variable, value) triplets."""
 
     # Group the data by timestamp by putting it all in a dict. Skip missing (NaN) values.
@@ -107,19 +137,24 @@ def points_from_values(influx_config: Dict[str, Any], values: List):
     for t, fields in temp.items():
         points.append(
             {
-                "measurement": influx_config["measurement"],
+                "measurement": config.influx.measurement,
                 "time": t,
                 "fields": fields,
-                "tags": influx_config.get("tags", {}),
+                "tags": config.influx.tags,
             }
         )
     return points
 
 
-async def upload_influx(influx_config, points):
+async def upload_influx(config: Config, points: List[Dict]):
     """Upload a list of data points to InfluxDB."""
     async with aioinflux.InfluxDBClient(
-        **influx_config["connection"], ssl=True
+        host=config.influx.host,
+        username=config.influx.username,
+        password=config.influx.password,
+        port=config.influx.port,
+        database=config.influx.database,
+        ssl=True,
     ) as client:
         for point in points:
             try:
@@ -129,36 +164,21 @@ async def upload_influx(influx_config, points):
     return True
 
 
-def check_config(config: Dict[str, Any]):
-    return "influxdb" in config and check_config_influx(config["influxdb"])
+def get_query_params(config: Config) -> Dict[str, Any]:
+    query_params = BASE_QUERY_PARAMS.copy()
+    query_params["place"] = config.FMI.location
+    query_params["parameters"] = ",".join(config.FMI.variables)
+    return query_params
 
 
-def check_config_influx(config: Dict[str, Any]):
-    return (
-        "connection" in config
-        and "host" in config["connection"]
-        and "port" in config["connection"]
-        and "username" in config["connection"]
-        and "password" in config["connection"]
-        and "db" in config["connection"]
-    )
+async def mainloop(config: Config):
 
-
-async def mainloop(config):
-    influx_config = config["influxdb"]
-    fmi_config = config["FMI"]
-
-    delay = fmi_config.get("delay", 60)
-    history = fmi_config.get("history", 10)
-
-    query_params = DEFAULT_QUERY_PARAMS.copy()
-    query_params["place"] = fmi_config.get("location", "Kumpula")
-    query_params["parameters"] = ",".join(fmi_config.get("variables", []))
+    query_params = get_query_params(config)
 
     while True:
         now = datetime.utcnow()
         logging.info("Start working...")
-        start = now - timedelta(minutes=history)
+        start = now - timedelta(minutes=config.FMI.history)
         query_params["starttime"] = get_timestring(start)
         query_params["endtime"] = get_timestring(now)
 
@@ -166,8 +186,10 @@ async def mainloop(config):
         async with aiohttp.ClientSession() as session:
             raw_data = await rawdata_from_query(session, query_params)
         if raw_data is None:
-            logging.error(f"No data received. Waiting {delay} seconds to retry.")
-            await asyncio.sleep(delay)
+            logging.error(
+                f"No data received. Waiting {config.FMI.delay} seconds to retry."
+            )
+            await asyncio.sleep(config.FMI.delay)
             continue
 
         logging.debug(raw_data)
@@ -175,27 +197,24 @@ async def mainloop(config):
         # 2. Parse XML and convert to data points for AIOInflux
         xml_data = xml_from_raw(raw_data)
         values = values_from_xml(xml_data)
-        points = points_from_values(influx_config, values)
+        points = points_from_values(config, values)
 
         if len(points) > 0:
             ts = [point["time"].isoformat() for point in points]
             logging.info(f"Data for timestamps {ts} received from FMI.")
-            await upload_influx(influx_config, points)
+            await upload_influx(config, points)
         else:
             logging.warning("No data points found in XML.")
 
-        logging.info(f"Waiting for {delay} seconds...")
-        await asyncio.sleep(delay)
+        logging.info(f"Waiting for {config.FMI.delay} seconds...")
+        await asyncio.sleep(config.FMI.delay)
 
 
-def main(argv):
-    config = read_config(argv[1])
-    if not check_config(config):
-        logging.error("Config file is not ok.")
-        exit()
+def main():
+    config = Config()
 
     # Set logging levels.
-    debug = config.get("debug_level", "warning")
+    debug = config.debug_level
     logging.basicConfig(level=DEBUG_LEVELS[debug])
     logging.info(f"Debug level is '{debug}'.")
 
