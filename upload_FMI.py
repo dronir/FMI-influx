@@ -92,7 +92,7 @@ def value_from_element(member, ns="*") -> Tuple:
         return t, var, val
 
 
-def points_from_values(influx_config: Dict[str,Any], values: List):
+def points_from_values(influx_config: Dict[str, Any], values: List):
     """Make list of data points for AIOInflux from a list of (time, variable, value) triplets."""
 
     # Group the data by timestamp by putting it all in a dict. Skip missing (NaN) values.
@@ -165,7 +165,7 @@ async def mainloop(config):
         # 1. Get data from FMI
         async with aiohttp.ClientSession() as session:
             raw_data = await rawdata_from_query(session, query_params)
-        if raw_data == None:
+        if raw_data is None:
             logging.error(f"No data received. Waiting {delay} seconds to retry.")
             await asyncio.sleep(delay)
             continue
@@ -182,7 +182,7 @@ async def mainloop(config):
             logging.info(f"Data for timestamps {ts} received from FMI.")
             await upload_influx(influx_config, points)
         else:
-            logging.warning(f"No data points found in XML.")
+            logging.warning("No data points found in XML.")
 
         logging.info(f"Waiting for {delay} seconds...")
         await asyncio.sleep(delay)
