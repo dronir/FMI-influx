@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple, List
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import isnan
-from sys import argv, exit
+from sys import exit
 from lxml import etree
 
 DEBUG_LEVELS = {
@@ -38,7 +38,7 @@ def get_timestring(t: datetime) -> str:
     return t.isoformat().split(".")[0] + "Z"
 
 
-async def rawdata_from_query(session, query_params: Dict):
+async def rawdata_from_query(session: aiohttp.ClientSession, query_params: Dict):
     """Make HTTP request, return text contents."""
     logging.debug(f"FMI query url: {QUERY_URL}")
     logging.debug(f"Query parameters: {query_params}")
@@ -50,7 +50,7 @@ async def rawdata_from_query(session, query_params: Dict):
             else:
                 logging.error(f"HTTP error {response.status} when fetching data.")
                 return None
-    except aiohttp.client_exceptions.ClientConnectorError as E:
+    except aiohttp.ClientConnectorError as E:
         logging.error(f"Error while retrieving data: {E}")
         return None
 
@@ -74,7 +74,7 @@ def values_from_xml(xml_tree) -> List:
     return [value_from_element(m, ns_bswfs) for m in members]
 
 
-def value_from_element(member, ns="*") -> Tuple:
+def value_from_element(member, ns: str = "*") -> Tuple:
     """Get one (time, variable, value) triplet from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
@@ -129,11 +129,11 @@ async def upload_influx(influx_config, points):
     return True
 
 
-def check_config(config):
+def check_config(config: Dict[str, Any]):
     return "influxdb" in config and check_config_influx(config["influxdb"])
 
 
-def check_config_influx(config):
+def check_config_influx(config: Dict[str, Any]):
     return (
         "connection" in config
         and "host" in config["connection"]
@@ -188,7 +188,7 @@ async def mainloop(config):
         await asyncio.sleep(delay)
 
 
-if __name__ == "__main__":
+def main(argv):
     config = read_config(argv[1])
     if not check_config(config):
         logging.error("Config file is not ok.")
