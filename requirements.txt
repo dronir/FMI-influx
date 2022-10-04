@@ -1,4 +1,0 @@
-lxml
-toml
-aiohttp
-aioinflux
