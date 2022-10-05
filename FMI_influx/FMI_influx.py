@@ -3,6 +3,7 @@ import asyncio
 import aioinflux
 import logging
 
+from functools import cache
 from pydantic import BaseSettings, Field
 from typing import Dict, Any, Tuple, List, Optional
 from collections import defaultdict
@@ -61,27 +62,35 @@ class Config(BaseSettings):
         env_prefix = "UPLOADER_"
 
 
+@cache
+def get_config():
+    return Config()
+
+
 def get_timestring(t: datetime) -> str:
     """ISO time string without decimals, end in Z, from datetime object."""
     return t.isoformat().split(".")[0] + "Z"
 
 
-async def rawdata_from_query(
-    session: aiohttp.ClientSession, query_params: Dict
-) -> Optional[str]:
+async def rawdata_from_query() -> Optional[str]:
     """Make HTTP request, return text contents."""
-    logging.debug(f"FMI query url: {QUERY_URL}")
+    logging.info(f"Getting data from {QUERY_URL}")
+    query_params = get_query_params()
     logging.debug(f"Query parameters: {query_params}")
     try:
-        async with session.get(QUERY_URL, params=query_params) as response:
-            logging.debug(response)
-            if response.status == 200:
-                return await response.text()
-            else:
-                logging.error(f"HTTP error {response.status} when fetching data.")
-                return None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(QUERY_URL, params=query_params) as response:
+                logging.debug(response)
+                if response.status == 200:
+                    return await response.text()
+                else:
+                    logging.error(f"HTTP error {response.status} when fetching data.")
+                    return None
     except aiohttp.ClientConnectorError as E:
         logging.error(f"Error while retrieving data: {E}")
+        return None
+    except Exception as E:
+        logging.error(f"Unexpected exception: {E}")
         return None
 
 
@@ -91,7 +100,7 @@ def xml_from_raw(raw_result: str) -> etree.Element:
     try:
         return etree.fromstring(xml_data)
     except Exception as E:
-        logging.error(f"Exception while parsing XML data:\n {E}")
+        logging.error(f"Error while parsing XML data:\n {E}")
         return etree.Element("root")  # Return an empty XML tree.
 
 
@@ -104,7 +113,7 @@ def values_from_xml(xml_tree: etree.Element) -> List[Tuple]:
     return [value_from_element(m, ns_bswfs) for m in members]
 
 
-def value_from_element(member, ns: str = "*") -> Tuple:
+def value_from_element(member: etree.Element, ns: str = "*") -> Tuple:
     """Get one (time, variable, value) triplet from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
@@ -122,9 +131,9 @@ def value_from_element(member, ns: str = "*") -> Tuple:
         return t, var, val
 
 
-def points_from_values(config: Config, values: List) -> List[Dict[str, Any]]:
+def points_from_values(values: List) -> List[Dict[str, Any]]:
     """Make list of data points for AIOInflux from a list of (time, variable, value) triplets."""
-
+    config = get_config()
     # Group the data by timestamp by putting it all in a dict. Skip missing (NaN) values.
     temp: defaultdict = defaultdict(lambda: defaultdict(dict))
     for t, var, value in values:
@@ -146,8 +155,10 @@ def points_from_values(config: Config, values: List) -> List[Dict[str, Any]]:
     return points
 
 
-async def upload_influx(config: Config, points: List[Dict]):
+async def upload_influx(points: List[Dict]):
     """Upload a list of data points to InfluxDB."""
+    config = get_config()
+    logging.info(f"Uploading to {config.influx.host}")
     async with aioinflux.InfluxDBClient(
         host=config.influx.host,
         username=config.influx.username,
@@ -156,71 +167,68 @@ async def upload_influx(config: Config, points: List[Dict]):
         database=config.influx.database,
         ssl=True,
     ) as client:
-        for point in points:
-            try:
-                await client.write(point)
-            except ValueError as E:
-                logging.error(f"Failed to write to InfluxDB: {E}")
+        try:
+            await client.write(points)
+        except ValueError as E:
+            logging.error(f"Failed to write to InfluxDB: {E}")
+            return False
+        except Exception as E:
+            logging.error(f"Unxpected exception: {E}")
+            return False
     return True
 
 
-def get_query_params(config: Config) -> Dict[str, Any]:
+def get_query_params() -> Dict[str, Any]:
+    config = get_config()
+
+    now = datetime.utcnow()
+    start = now - timedelta(minutes=config.FMI.history)
+
     query_params = BASE_QUERY_PARAMS.copy()
     query_params["place"] = config.FMI.location
     query_params["parameters"] = ",".join(config.FMI.variables)
+    query_params["starttime"] = get_timestring(start)
+    query_params["endtime"] = get_timestring(now)
     return query_params
 
 
-async def mainloop(config: Config):
+def get_timestamps(points):
+    return [point["time"].isoformat() for point in points]
 
-    query_params = get_query_params(config)
 
+async def mainloop():
+    config = get_config()
+    delay = config.FMI.delay
     while True:
-        now = datetime.utcnow()
         logging.info("Start working...")
-        start = now - timedelta(minutes=config.FMI.history)
-        query_params["starttime"] = get_timestring(start)
-        query_params["endtime"] = get_timestring(now)
 
         # 1. Get data from FMI
-        async with aiohttp.ClientSession() as session:
-            raw_data = await rawdata_from_query(session, query_params)
+        raw_data = await rawdata_from_query()
+
         if raw_data is None:
-            logging.error(
-                f"No data received. Waiting {config.FMI.delay} seconds to retry."
-            )
-            await asyncio.sleep(config.FMI.delay)
+            logging.error(f"No data received. Waiting {delay} seconds to retry.")
+            await asyncio.sleep(delay)
             continue
 
         logging.debug(raw_data)
 
         # 2. Parse XML and convert to data points for AIOInflux
-        xml_data = xml_from_raw(raw_data)
-        values = values_from_xml(xml_data)
-        points = points_from_values(config, values)
+        points = points_from_values(values_from_xml(xml_from_raw(raw_data)))
 
         if len(points) > 0:
-            ts = [point["time"].isoformat() for point in points]
-            logging.info(f"Data for timestamps {ts} received from FMI.")
-            await upload_influx(config, points)
+            logging.debug(f"Timestamps: {get_timestamps(points)}")
+            await upload_influx(points)
         else:
             logging.warning("No data points found in XML.")
 
-        logging.info(f"Waiting for {config.FMI.delay} seconds...")
-        await asyncio.sleep(config.FMI.delay)
+        logging.info(f"Waiting for {delay} seconds...")
+        await asyncio.sleep(delay)
 
 
 def main():
-    config = Config()
-
-    # Set logging levels.
-    debug = config.debug_level
+    config = get_config()
+    debug = config.debug_level.lower()
     logging.basicConfig(level=DEBUG_LEVELS[debug])
     logging.info(f"Debug level is '{debug}'.")
 
-    # Run main task asynchronously.
-    # There's actually no need to do anything with asyncio, since
-    # everything happens serially right now, but maybe features
-    # will be added that require concurrency...
-    # I mostly wanted to check out AIOInflux.
-    asyncio.run(mainloop(config))
+    asyncio.run(mainloop())
