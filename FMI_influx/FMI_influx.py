@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from collections import namedtuple
+from dataclasses import dataclass
 from itertools import groupby
 from typing import Dict, Tuple, List, Generator, AsyncGenerator
 from datetime import datetime
@@ -14,7 +14,13 @@ from .influxdb import upload_influx
 
 
 # Some type aliases:
-DataPoint = namedtuple('DataPoint', ['t', 'var', 'val'])
+@dataclass
+class DataPoint:
+    t: datetime
+    var: str
+    val: float
+
+
 DataGenerator = Generator[DataPoint, None, None]
 
 
@@ -50,13 +56,14 @@ def point_from_element(member: etree.Element, ns: str = "*") -> DataPoint:
     try:
         t = datetime.fromisoformat(time[:-1])  # Remove the 'Z' at the end of timestamp
         val = float(value)
-    except ValueError as E:
+    except ValueError:
         logging.error(f"Failed to parse value: {time} {var} {value}")
+        return DataPoint(t=datetime.utcnow(), var=var, val=float("NaN"))
     except Exception as E:
         logging.error(f"Failed to convert timestamp of value from XML: {E}")
-        return DataPoint(datetime.utcnow(), var, float("NaN"))
+        return DataPoint(t=datetime.utcnow(), var=var, val=float("NaN"))
     else:
-        return DataPoint(t, var, val)
+        return DataPoint(t=t, var=var, val=val)
 
 
 def group_by_time(values: DataGenerator) -> Generator[Tuple[datetime, DataGenerator], None, None]:
@@ -67,7 +74,7 @@ def group_by_time(values: DataGenerator) -> Generator[Tuple[datetime, DataGenera
 
 def fields_from_group(group: DataGenerator) -> Dict[str, float]:
     """Get InfluxDB fields from tuple group generator."""
-    return {k: v for t, k, v in group}
+    return {point.var: point.val for point in group}
 
 
 def payload_from_group(t: datetime, group: DataGenerator):
