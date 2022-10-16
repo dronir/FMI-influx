@@ -3,7 +3,7 @@ import aioinflux
 import logging
 
 from itertools import groupby
-from typing import Dict, Tuple, List, Generator, Iterable
+from typing import Dict, Tuple, List, Generator, AsyncGenerator, Any
 from datetime import datetime
 from math import isnan
 from lxml import etree
@@ -22,7 +22,12 @@ def xml_from_raw(raw_result: str) -> etree.Element:
         return etree.Element("root")  # Return an empty XML tree.
 
 
-def values_from_xml(xml_tree: etree.Element) -> Generator:
+# Some type aliases:
+DataPoint = Tuple[datetime, str, float]
+DataGenerator = Generator[DataPoint, None, None]
+
+
+def values_from_xml(xml_tree: etree.Element) -> DataGenerator:
     """Return a generator of (time, variable, value) tuples, given XML tree.
 
     The generator skips any items with a NaN value."""
@@ -34,7 +39,7 @@ def values_from_xml(xml_tree: etree.Element) -> Generator:
     yield from (p for p in raw_values if not isnan(p[2]))
 
 
-def value_from_element(member: etree.Element, ns: str = "*") -> Tuple:
+def value_from_element(member: etree.Element, ns: str = "*") -> DataPoint:
     """Get one (time, variable, value) tuple from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
@@ -52,18 +57,22 @@ def value_from_element(member: etree.Element, ns: str = "*") -> Tuple:
         return t, var, val
 
 
-def group_by_time(values: Generator) -> Generator:
+def time_key(p: DataPoint) -> datetime:
+    return p[0]
+
+
+def group_by_time(values: DataGenerator) -> Generator[Tuple[datetime, DataGenerator], None, None]:
     """Generator that returns (timestamp, group generator) pairs."""
-    s = sorted(values, key=lambda x: x[0])
-    yield from groupby(s, key=lambda x: x[0])
+    s = sorted(values, key=time_key)
+    yield from groupby(s, key=time_key)
 
 
-def fields_from_group(group: Iterable) -> Dict[str, float]:
+def fields_from_group(group: DataGenerator) -> Dict[str, float]:
     """Get InfluxDB fields from tuple group generator."""
     return {k: v for t, k, v in group}
 
 
-def points_from_group(t: str, group: Iterable):
+def points_from_group(t: datetime, group: DataGenerator):
     """Make InfluxDB payload dict from timestamp and tuple group generator."""
     config = get_config()
     return {
@@ -74,7 +83,7 @@ def points_from_group(t: str, group: Iterable):
             }
 
 
-async def upload_influx(points: List[Dict]):
+async def upload_influx(points: List[Dict[str, Any]]):
     """Upload a list of data points to InfluxDB."""
     config = get_config()
     logging.info(f"Uploading to {config.influx.host}")
@@ -101,7 +110,7 @@ def get_timestamps(points: List[Dict]) -> List[str]:
     return [point["time"].isoformat() for point in points]
 
 
-async def points_generator():
+async def points_generator() -> AsyncGenerator[List[Dict], None]:
     config = get_config()
     delay = config.FMI.delay
     while True:
