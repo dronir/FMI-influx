@@ -38,7 +38,7 @@ def get_query_params() -> Dict[str, Any]:
 
 async def make_query() -> Optional[str]:
     """Make HTTP request, return text contents."""
-    logging.info(f"Getting data from {QUERY_URL}")
+    logging.info(f"Making request to {QUERY_URL}")
     query_params = get_query_params()
     logging.debug(f"Query parameters: {query_params}")
     try:

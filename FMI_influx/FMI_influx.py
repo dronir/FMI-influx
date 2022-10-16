@@ -13,6 +13,7 @@ async def points_generator() -> AsyncGenerator[List[Dict], None]:
     config = get_config()
     delay = config.FMI.delay
     while True:
+        logging.debug("Fetching data...")
         if (raw_data := await make_query()) is None:
             logging.error(f"No data received. Waiting {delay} seconds to retry.")
             await asyncio.sleep(delay)
@@ -26,7 +27,6 @@ async def points_generator() -> AsyncGenerator[List[Dict], None]:
 
 async def mainloop():
     async for points in points_generator():
-        logging.info("Start working...")
         if len(points) > 0:
             logging.debug(f"Timestamps: {[point['time'].isoformat() for point in points]}")
             await upload_influx(points)

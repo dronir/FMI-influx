@@ -90,6 +90,7 @@ def payload_from_group(t: datetime, group: DataGenerator):
 
 def parse_payload(raw_data: str) -> List[Dict[str, Any]]:
     """Take raw XML data and parse it into InfluxDB points."""
+    logging.debug("Building InfluxDB payload...")
     raw_xml = xml_from_raw(raw_data)
     points = points_from_xml(raw_xml)
     groups = group_by_time(points)
