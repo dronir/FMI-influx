@@ -11,7 +11,6 @@ from lxml import etree
 from .config import get_config
 
 
-# Some type aliases:
 @dataclass
 class DataPoint:
     t: datetime
@@ -19,6 +18,7 @@ class DataPoint:
     val: float
 
 
+# A type alias
 DataGenerator = Generator[DataPoint, None, None]
 
 
