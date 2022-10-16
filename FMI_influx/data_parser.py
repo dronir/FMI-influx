@@ -77,17 +77,12 @@ def group_by_time(values: DataGenerator) -> Generator[Tuple[datetime, DataGenera
     yield from groupby(s, key=lambda p: p.t)
 
 
-def fields_from_group(group: DataGenerator) -> Dict[str, float]:
-    """Get InfluxDB fields from tuple group generator."""
-    return {point.var: point.val for point in group}
-
-
 def payload_from_group(t: datetime, group: DataGenerator):
     """Make InfluxDB payload dict from timestamp and tuple group generator."""
     config = get_config()
     return {
         "time": t,
-        "fields": fields_from_group(group),
+        "fields": {point.var: point.val for point in group},
         "measurement": config.influx.measurement,
         "tags": config.influx.tags,
     }

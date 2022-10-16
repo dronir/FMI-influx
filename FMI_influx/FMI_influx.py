@@ -9,10 +9,6 @@ from .influxdb import upload_influx
 from .data_parser import parse_payload
 
 
-def get_timestamps(points: List[Dict]) -> List[str]:
-    return [point["time"].isoformat() for point in points]
-
-
 async def points_generator() -> AsyncGenerator[List[Dict], None]:
     config = get_config()
     delay = config.FMI.delay
@@ -32,7 +28,7 @@ async def mainloop():
     async for points in points_generator():
         logging.info("Start working...")
         if len(points) > 0:
-            logging.debug(f"Timestamps: {get_timestamps(points)}")
+            logging.debug(f"Timestamps: {[point['time'].isoformat() for point in points]}")
             await upload_influx(points)
         else:
             logging.warning("No data points found in XML.")
