@@ -47,6 +47,7 @@ def points_from_xml(xml_tree: etree.Element) -> DataGenerator:
 
 @cache
 def no_data(var: str) -> DataPoint:
+    """Return a dummy data point for given variable name."""
     return DataPoint(t=datetime.utcnow(), var=var, val=float("NaN"))
 
 
@@ -93,6 +94,7 @@ def payload_from_group(t: datetime, group: DataGenerator):
 
 
 def parse_payload(raw_data: str) -> List[Dict[str, Any]]:
+    """Take raw XML data and parse it into InfluxDB points."""
     raw_xml = xml_from_raw(raw_data)
     points = points_from_xml(raw_xml)
     groups = group_by_time(points)

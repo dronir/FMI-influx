@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "FMI-influx"
-version = "0.2.0"
+version = "0.3.0"
 description = "FMI API to InfluxDB uploader"
 authors = ["Olli Wilkman <olli.wilkman@iki.fi>"]
 license = "MIT"
