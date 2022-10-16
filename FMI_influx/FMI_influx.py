@@ -4,8 +4,9 @@ import aioinflux
 import logging
 
 from functools import cache
+from itertools import groupby
 from pydantic import BaseSettings, Field
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, Tuple, List, Optional, Generator, Iterable
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import isnan
@@ -59,11 +60,13 @@ class Config(BaseSettings):
     influx: InfluxConfig = Field(default_factory=InfluxConfig)
 
     class Config:
+        env_file = ".env"
         env_prefix = "UPLOADER_"
 
 
 @cache
 def get_config():
+    """Reads config from environmental variables or .env file."""
     return Config()
 
 
@@ -72,7 +75,7 @@ def get_timestring(t: datetime) -> str:
     return t.isoformat().split(".")[0] + "Z"
 
 
-async def rawdata_from_query() -> Optional[str]:
+async def make_query() -> Optional[str]:
     """Make HTTP request, return text contents."""
     logging.info(f"Getting data from {QUERY_URL}")
     query_params = get_query_params()
@@ -95,7 +98,7 @@ async def rawdata_from_query() -> Optional[str]:
 
 
 def xml_from_raw(raw_result: str) -> etree.Element:
-    """Turn text content from HTTP request into XML tree."""
+    """Turn plain text content from HTTP request into XML tree."""
     xml_data = bytes(raw_result, "utf-8")
     try:
         return etree.fromstring(xml_data)
@@ -104,17 +107,20 @@ def xml_from_raw(raw_result: str) -> etree.Element:
         return etree.Element("root")  # Return an empty XML tree.
 
 
-def values_from_xml(xml_tree: etree.Element) -> List[Tuple]:
-    """Return all (time, variable, value) triplets, given XML tree."""
+def values_from_xml(xml_tree: etree.Element) -> Generator:
+    """Return a generator of (time, variable, value) tuples, given XML tree.
+
+    The generator skips any items with a NaN value."""
     # Handle namespaces properly because why not (could just wildcard them to be honest)
     ns_wfs = xml_tree.nsmap["wfs"]
     ns_bswfs = xml_tree.nsmap["BsWfs"]
     members = xml_tree.findall(f".//{{{ns_wfs}}}member")
-    return [value_from_element(m, ns_bswfs) for m in members]
+    raw_values = (value_from_element(m, ns_bswfs) for m in members)
+    yield from (p for p in raw_values if not isnan(p[2]))
 
 
 def value_from_element(member: etree.Element, ns: str = "*") -> Tuple:
-    """Get one (time, variable, value) triplet from the XML element containing it."""
+    """Get one (time, variable, value) tuple from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
     value = member.find(f".//{{{ns}}}ParameterValue").text
@@ -131,28 +137,26 @@ def value_from_element(member: etree.Element, ns: str = "*") -> Tuple:
         return t, var, val
 
 
-def points_from_values(values: List) -> List[Dict[str, Any]]:
-    """Make list of data points for AIOInflux from a list of (time, variable, value) triplets."""
-    config = get_config()
-    # Group the data by timestamp by putting it all in a dict. Skip missing (NaN) values.
-    temp: defaultdict = defaultdict(lambda: defaultdict(dict))
-    for t, var, value in values:
-        if isnan(value):
-            continue
-        temp[t][var] = value
+def group_by_time(values: Generator) -> Generator:
+    """Generator that returns (timestamp, group generator) pairs."""
+    s = sorted(values, key=lambda x: x[0])
+    yield from groupby(s, key=lambda x: x[0])
 
-    # Make list of data points in the format expected by AIOInflux.
-    points = []
-    for t, fields in temp.items():
-        points.append(
-            {
-                "measurement": config.influx.measurement,
+
+def fields_from_group(group: Iterable) -> Dict[str, float]:
+    """Get InfluxDB fields from tuple group generator."""
+    return {k: v for t, k, v in group}
+
+
+def points_from_group(t: str, group: Iterable):
+    """Make InfluxDB payload dict from timestamp and tuple group generator."""
+    config = get_config()
+    return {
                 "time": t,
-                "fields": fields,
+                "fields": fields_from_group(group),
+                "measurement": config.influx.measurement,
                 "tags": config.influx.tags,
             }
-        )
-    return points
 
 
 async def upload_influx(points: List[Dict]):
@@ -192,37 +196,37 @@ def get_query_params() -> Dict[str, Any]:
     return query_params
 
 
-def get_timestamps(points):
+def get_timestamps(points: List[Dict]) -> List[str]:
     return [point["time"].isoformat() for point in points]
 
 
-async def mainloop():
+async def points_generator():
     config = get_config()
     delay = config.FMI.delay
     while True:
-        logging.info("Start working...")
-
-        # 1. Get data from FMI
-        raw_data = await rawdata_from_query()
-
-        if raw_data is None:
+        if (raw_data := await make_query()) is None:
             logging.error(f"No data received. Waiting {delay} seconds to retry.")
             await asyncio.sleep(delay)
             continue
 
-        logging.debug(raw_data)
+        raw_xml = xml_from_raw(raw_data)
+        values = values_from_xml(raw_xml)
+        grouped = group_by_time(values)
+        points = (points_from_group(t, g) for t, g in grouped)
+        yield list(points)
 
-        # 2. Parse XML and convert to data points for AIOInflux
-        points = points_from_values(values_from_xml(xml_from_raw(raw_data)))
+        logging.debug(f"Waiting for {delay} seconds...")
+        await asyncio.sleep(delay)
 
+
+async def mainloop():
+    async for points in points_generator():
+        logging.info("Start working...")
         if len(points) > 0:
             logging.debug(f"Timestamps: {get_timestamps(points)}")
             await upload_influx(points)
         else:
             logging.warning("No data points found in XML.")
-
-        logging.info(f"Waiting for {delay} seconds...")
-        await asyncio.sleep(delay)
 
 
 def main():
