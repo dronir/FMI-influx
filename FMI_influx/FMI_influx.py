@@ -1,15 +1,20 @@
 import asyncio
-import aioinflux
 import logging
 
 from itertools import groupby
-from typing import Dict, Tuple, List, Generator, AsyncGenerator, Any
+from typing import Dict, Tuple, List, Generator, AsyncGenerator
 from datetime import datetime
 from math import isnan
 from lxml import etree
 
 from .config import get_config, DEBUG_LEVELS
 from .fmi_api import make_query
+from .influxdb import upload_influx
+
+
+# Some type aliases:
+DataPoint = Tuple[datetime, str, float]
+DataGenerator = Generator[DataPoint, None, None]
 
 
 def xml_from_raw(raw_result: str) -> etree.Element:
@@ -20,11 +25,6 @@ def xml_from_raw(raw_result: str) -> etree.Element:
     except Exception as E:
         logging.error(f"Error while parsing XML data:\n {E}")
         return etree.Element("root")  # Return an empty XML tree.
-
-
-# Some type aliases:
-DataPoint = Tuple[datetime, str, float]
-DataGenerator = Generator[DataPoint, None, None]
 
 
 def values_from_xml(xml_tree: etree.Element) -> DataGenerator:
@@ -76,34 +76,11 @@ def points_from_group(t: datetime, group: DataGenerator):
     """Make InfluxDB payload dict from timestamp and tuple group generator."""
     config = get_config()
     return {
-                "time": t,
-                "fields": fields_from_group(group),
-                "measurement": config.influx.measurement,
-                "tags": config.influx.tags,
-            }
-
-
-async def upload_influx(points: List[Dict[str, Any]]):
-    """Upload a list of data points to InfluxDB."""
-    config = get_config()
-    logging.info(f"Uploading to {config.influx.host}")
-    async with aioinflux.InfluxDBClient(
-        host=config.influx.host,
-        username=config.influx.username,
-        password=config.influx.password,
-        port=config.influx.port,
-        database=config.influx.database,
-        ssl=True,
-    ) as client:
-        try:
-            await client.write(points)
-        except ValueError as E:
-            logging.error(f"Failed to write to InfluxDB: {E}")
-            return False
-        except Exception as E:
-            logging.error(f"Unxpected exception: {E}")
-            return False
-    return True
+        "time": t,
+        "fields": fields_from_group(group),
+        "measurement": config.influx.measurement,
+        "tags": config.influx.tags,
+    }
 
 
 def get_timestamps(points: List[Dict]) -> List[str]:
