@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from collections import namedtuple
 from itertools import groupby
 from typing import Dict, Tuple, List, Generator, AsyncGenerator
 from datetime import datetime
@@ -13,7 +14,7 @@ from .influxdb import upload_influx
 
 
 # Some type aliases:
-DataPoint = Tuple[datetime, str, float]
+DataPoint = namedtuple('DataPoint', ['t', 'var', 'val'])
 DataGenerator = Generator[DataPoint, None, None]
 
 
@@ -27,7 +28,7 @@ def xml_from_raw(raw_result: str) -> etree.Element:
         return etree.Element("root")  # Return an empty XML tree.
 
 
-def values_from_xml(xml_tree: etree.Element) -> DataGenerator:
+def points_from_xml(xml_tree: etree.Element) -> DataGenerator:
     """Return a generator of (time, variable, value) tuples, given XML tree.
 
     The generator skips any items with a NaN value."""
@@ -35,11 +36,11 @@ def values_from_xml(xml_tree: etree.Element) -> DataGenerator:
     ns_wfs = xml_tree.nsmap["wfs"]
     ns_bswfs = xml_tree.nsmap["BsWfs"]
     members = xml_tree.findall(f".//{{{ns_wfs}}}member")
-    raw_values = (value_from_element(m, ns_bswfs) for m in members)
-    yield from (p for p in raw_values if not isnan(p[2]))
+    raw_points = (point_from_element(m, ns_bswfs) for m in members)
+    yield from (p for p in raw_points if not isnan(p.val))
 
 
-def value_from_element(member: etree.Element, ns: str = "*") -> DataPoint:
+def point_from_element(member: etree.Element, ns: str = "*") -> DataPoint:
     """Get one (time, variable, value) tuple from the XML element containing it."""
     time = member.find(f".//{{{ns}}}Time").text
     var = member.find(f".//{{{ns}}}ParameterName").text
@@ -47,24 +48,21 @@ def value_from_element(member: etree.Element, ns: str = "*") -> DataPoint:
     # Convert timestamp to datetime and value to float.
     # If there's an error, return a NaN value that will get ignored later.
     try:
-        # Remove the 'Z' at the end of timestamp crudely.
-        t = datetime.fromisoformat(time[:-1])
+        t = datetime.fromisoformat(time[:-1])  # Remove the 'Z' at the end of timestamp
         val = float(value)
+    except ValueError as E:
+        logging.error(f"Failed to parse value: {time} {var} {value}")
     except Exception as E:
         logging.error(f"Failed to convert timestamp of value from XML: {E}")
-        return datetime.utcnow(), var, float("NaN")
+        return DataPoint(datetime.utcnow(), var, float("NaN"))
     else:
-        return t, var, val
-
-
-def time_key(p: DataPoint) -> datetime:
-    return p[0]
+        return DataPoint(t, var, val)
 
 
 def group_by_time(values: DataGenerator) -> Generator[Tuple[datetime, DataGenerator], None, None]:
-    """Generator that returns (timestamp, group generator) pairs."""
-    s = sorted(values, key=time_key)
-    yield from groupby(s, key=time_key)
+    """Turns data point generator into grouped (timestamp, group generator) pairs."""
+    s = sorted(values, key=lambda p: p.t)
+    yield from groupby(s, key=lambda p: p.t)
 
 
 def fields_from_group(group: DataGenerator) -> Dict[str, float]:
@@ -72,7 +70,7 @@ def fields_from_group(group: DataGenerator) -> Dict[str, float]:
     return {k: v for t, k, v in group}
 
 
-def points_from_group(t: datetime, group: DataGenerator):
+def payload_from_group(t: datetime, group: DataGenerator):
     """Make InfluxDB payload dict from timestamp and tuple group generator."""
     config = get_config()
     return {
@@ -97,10 +95,9 @@ async def points_generator() -> AsyncGenerator[List[Dict], None]:
             continue
 
         raw_xml = xml_from_raw(raw_data)
-        values = values_from_xml(raw_xml)
-        grouped = group_by_time(values)
-        points = (points_from_group(t, g) for t, g in grouped)
-        yield list(points)
+        points = points_from_xml(raw_xml)
+        groups = group_by_time(points)
+        yield list(payload_from_group(t, g) for t, g in groups)
 
         logging.debug(f"Waiting for {delay} seconds...")
         await asyncio.sleep(delay)
