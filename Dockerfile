@@ -5,9 +5,9 @@ RUN apk update \
 
 
 WORKDIR /code
-COPY poetry.lock pyproject.toml FMI_influx /code/
+COPY poetry.lock pyproject.toml /code/
+COPY FMI_influx /code/FMI_influx
 
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev
+RUN poetry install --only main
 
 CMD ["poetry", "run", "python", "-m", "FMI_influx"]
