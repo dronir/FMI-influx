@@ -7,7 +7,6 @@ from functools import cache
 from itertools import groupby
 from pydantic import BaseSettings, Field
 from typing import Dict, Any, Tuple, List, Optional, Generator, Iterable
-from collections import defaultdict
 from datetime import datetime, timedelta
 from math import isnan
 from lxml import etree
